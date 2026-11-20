@@ -47,6 +47,108 @@ function enableShadows(obj: THREE.Object3D): void {
   });
 }
 
+// Rebuild low-segment primitives with smoother geometry so models read as
+// crafted characters instead of blocky placeholder shapes.
+function highDetailGeometry(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+  const p = (geo as THREE.BufferGeometry & { parameters?: Record<string, number | boolean> }).parameters;
+  if (!p) return geo;
+  const t = geo.type;
+  if (t === 'SphereGeometry' && ((p.widthSegments as number) < 20 || (p.heightSegments as number) < 12)) {
+    return new THREE.SphereGeometry(
+      p.radius as number,
+      Math.max((p.widthSegments as number) || 8, 24),
+      Math.max((p.heightSegments as number) || 6, 16),
+      (p.phiStart as number) || 0,
+      (p.phiLength as number) || Math.PI * 2,
+      (p.thetaStart as number) || 0,
+      (p.thetaLength as number) || Math.PI
+    );
+  }
+  if (t === 'CylinderGeometry' && (p.radialSegments as number) < 16) {
+    return new THREE.CylinderGeometry(
+      p.radiusTop as number,
+      p.radiusBottom as number,
+      p.height as number,
+      Math.max((p.radialSegments as number) || 8, 20),
+      Math.max((p.heightSegments as number) || 1, 1),
+      (p.openEnded as boolean) || false,
+      (p.thetaStart as number) || 0,
+      (p.thetaLength as number) || Math.PI * 2
+    );
+  }
+  if (t === 'ConeGeometry' && (p.radialSegments as number) < 16) {
+    return new THREE.ConeGeometry(
+      p.radius as number,
+      p.height as number,
+      Math.max((p.radialSegments as number) || 6, 24),
+      Math.max((p.heightSegments as number) || 1, 1),
+      (p.openEnded as boolean) || false,
+      (p.thetaStart as number) || 0,
+      (p.thetaLength as number) || Math.PI * 2
+    );
+  }
+  if (t === 'TorusGeometry' && (p.tubularSegments as number) < 32) {
+    return new THREE.TorusGeometry(
+      p.radius as number,
+      p.tube as number,
+      Math.max((p.radialSegments as number) || 8, 12),
+      Math.max((p.tubularSegments as number) || 16, 40),
+      (p.arc as number) || Math.PI * 2
+    );
+  }
+  return geo;
+}
+
+function polishModel(root: THREE.Object3D): void {
+  root.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (mesh.isMesh) mesh.geometry = highDetailGeometry(mesh.geometry);
+  });
+}
+
+// Stylized face so the heroes read as characters rather than dolls
+function addFacialFeatures(head: THREE.Group): void {
+  const face = head.children.find((c) => {
+    const m = c as THREE.Mesh;
+    const mat = m.material as THREE.MeshStandardMaterial | undefined;
+    return m.isMesh && mat?.color && mat.color.getHex() === 0xf6d5be;
+  }) as THREE.Mesh | undefined;
+  if (!face) return;
+  const r = ((face.geometry as THREE.BufferGeometry & { parameters?: { radius?: number } }).parameters?.radius ?? 0.31) as number;
+  const fy = face.position.y;
+  const eyeMat = new THREE.MeshStandardMaterial({ color: 0x1c1b26, roughness: 0.28, metalness: 0.05 });
+  const browMat = new THREE.MeshStandardMaterial({ color: 0x2b2116, roughness: 0.62 });
+  for (const s of [-1, 1]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(r * 0.17, 14, 10), eyeMat);
+    eye.scale.set(1, 1.25, 0.55);
+    eye.position.set(s * r * 0.34, fy + r * 0.13, r * 0.94);
+    head.add(eye);
+
+    const glint = new THREE.Mesh(
+      new THREE.SphereGeometry(r * 0.05, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xffffff })
+    );
+    glint.position.set(s * r * 0.34 + r * 0.055, fy + r * 0.2, r * 0.99);
+    head.add(glint);
+
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(r * 0.36, r * 0.075, r * 0.1), browMat);
+    brow.position.set(s * r * 0.34, fy + r * 0.4, r * 0.92);
+    brow.rotation.z = s * 0.16;
+    head.add(brow);
+  }
+  const noseMat = new THREE.MeshStandardMaterial({ color: 0xe7b79f, roughness: 0.55 });
+  const nose = new THREE.Mesh(new THREE.ConeGeometry(r * 0.075, r * 0.2, 10), noseMat);
+  nose.rotation.x = Math.PI * 0.5;
+  nose.position.set(0, fy - r * 0.03, r * 0.95);
+  head.add(nose);
+  const mouth = new THREE.Mesh(
+    new THREE.BoxGeometry(r * 0.26, r * 0.04, r * 0.07),
+    new THREE.MeshStandardMaterial({ color: 0xb35a52, roughness: 0.65 })
+  );
+  mouth.position.set(0, fy - r * 0.42, r * 0.9);
+  head.add(mouth);
+}
+
 export function buildHeroModel(heroId: HeroId): ArticulatedModel {
   const root = new THREE.Group();
   const body = new THREE.Group();
@@ -88,52 +190,97 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
     const royalBlue = matCloth(0x1d4ed8, 0.62);
     const holyGlow = matGlow(0xfef08a, 1.8);
 
-    // Armored Cuirass
-    const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.42, 1.05, 8), gold);
+    // Armored Cuirass: tapered plate barrel with a raised breastplate
+    const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.38, 1.02, 24), gold);
     chest.position.y = 0.42;
+    chest.scale.z = 0.8;
     torso.add(chest);
+    const collar = new THREE.Mesh(new THREE.TorusGeometry(0.32, 0.06, 12, 28), steel);
+    collar.rotation.x = Math.PI / 2;
+    collar.position.y = 0.92;
+    torso.add(collar);
 
-    const chestPlate = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.62, 0.56), steel);
-    chestPlate.position.set(0, 0.48, 0.08);
+    const chestPlate = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.56, 0.2), steel);
+    chestPlate.position.set(0, 0.5, 0.34);
+    chestPlate.rotation.x = -0.05;
     torso.add(chestPlate);
+    for (const trimY of [0.78, 0.22]) {
+      const trim = new THREE.Mesh(new THREE.BoxGeometry(0.68, 0.06, 0.24), gold);
+      trim.position.set(0, trimY, 0.34);
+      torso.add(trim);
+    }
 
     const chestGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.16, 0), matGlow(0x38bdf8, 2.0));
-    chestGem.position.set(0, 0.55, 0.39);
+    chestGem.position.set(0, 0.56, 0.49);
     torso.add(chestGem);
 
-    // Waist tasset skirt
-    const waist = new THREE.Mesh(new THREE.CylinderGeometry(0.48, 0.62, 0.55, 8), royalBlue);
+    // Waist tasset skirt with gold faulds
+    const waist = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.6, 0.55, 20), royalBlue);
     waist.position.y = -0.18;
     torso.add(waist);
-    const belt = new THREE.Mesh(new THREE.TorusGeometry(0.45, 0.08, 8, 16), gold);
+    const belt = new THREE.Mesh(new THREE.TorusGeometry(0.44, 0.075, 12, 28), gold);
     belt.rotation.x = Math.PI / 2;
     belt.position.y = 0.02;
     torso.add(belt);
+    for (const [x, rz] of [[-0.3, 0.3], [0, 0], [0.3, -0.3]] as const) {
+      const fauld = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.36, 0.07), gold);
+      fauld.position.set(x, -0.35, 0.38);
+      fauld.rotation.z = rz;
+      torso.add(fauld);
+    }
 
     // Massive Layered Pauldrons (Shoulder Armor)
     for (const [arm, sign] of [[leftArm, -1], [rightArm, 1]] as const) {
-      const pauldron = new THREE.Mesh(new THREE.SphereGeometry(0.36, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.65), gold);
-      pauldron.position.set(sign * 0.08, 0.12, 0);
-      pauldron.rotation.z = -sign * 0.3;
+      const pauldron = new THREE.Mesh(new THREE.SphereGeometry(0.37, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.62), gold);
+      pauldron.scale.set(1.14, 1.0, 1.14);
+      pauldron.position.set(sign * 0.06, 0.14, 0);
+      pauldron.rotation.z = -sign * 0.28;
       arm.add(pauldron);
+      const pauldronRim = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.05, 12, 28), steel);
+      pauldronRim.rotation.x = Math.PI / 2;
+      pauldronRim.position.set(sign * 0.1, 0.02, 0);
+      arm.add(pauldronRim);
+      const pauldronSpike = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.26, 12), gold);
+      pauldronSpike.position.set(sign * 0.3, 0.34, 0);
+      pauldronSpike.rotation.z = -sign * 0.5;
+      arm.add(pauldronSpike);
 
-      const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.14, 0.75, 8), steel);
-      upper.position.y = -0.35;
+      const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.13, 0.48, 20), steel);
+      upper.position.y = -0.3;
       arm.add(upper);
 
-      const gauntlet = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.34, 0.24), gold);
-      gauntlet.position.y = -0.78;
-      arm.add(gauntlet);
+      const elbow = new THREE.Mesh(new THREE.SphereGeometry(0.15, 20, 14), gold);
+      elbow.position.y = -0.57;
+      arm.add(elbow);
+
+      const bracer = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.15, 0.32, 20), gold);
+      bracer.position.y = -0.76;
+      arm.add(bracer);
+
+      const fist = new THREE.Mesh(new THREE.SphereGeometry(0.14, 18, 12), steel);
+      fist.position.set(0, -0.95, 0.03);
+      arm.add(fist);
     }
 
     // Armored Legs & Sabatons
     for (const leg of [leftLeg, rightLeg]) {
-      const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.16, 0.62, 8), royalBlue);
+      const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.19, 0.16, 0.56, 20), royalBlue);
       thigh.position.y = -0.3;
       leg.add(thigh);
-      const greave = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.21, 0.62, 8), gold);
-      greave.position.y = -0.84;
+      const kneeCop = new THREE.Mesh(new THREE.SphereGeometry(0.17, 20, 14), gold);
+      kneeCop.scale.z = 0.9;
+      kneeCop.position.set(0, -0.62, 0.05);
+      leg.add(kneeCop);
+      const greave = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.21, 0.58, 20), steel);
+      greave.position.y = -0.9;
       leg.add(greave);
+      const bootTrim = new THREE.Mesh(new THREE.TorusGeometry(0.19, 0.04, 10, 24), gold);
+      bootTrim.rotation.x = Math.PI / 2;
+      bootTrim.position.y = -0.64;
+      leg.add(bootTrim);
+      const sabaton = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.16, 0.38), gold);
+      sabaton.position.set(0, -1.1, 0.06);
+      leg.add(sabaton);
     }
 
     // Heroic Knight Head + Winged Crown Helm
@@ -148,19 +295,44 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
     crown.position.y = 0.42;
     head.add(crown);
     for (const s of [-1, 1]) {
-      const wing = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.52, 4), gold);
+      const wing = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.52, 24), gold);
       wing.position.set(s * 0.36, 0.5, -0.05);
       wing.rotation.z = -s * 0.7;
       wing.rotation.x = -0.3;
       head.add(wing);
-    }
 
-    // Flowing Royal Blue Cape with Gold Trim
-    const cape = new THREE.Mesh(new THREE.BoxGeometry(0.95, 1.55, 0.08), royalBlue);
-    cape.position.set(0, -0.05, -0.45);
-    cape.rotation.x = 0.22;
-    torso.add(cape);
-    capeOrTails = cape;
+      const cheek = new THREE.Mesh(new THREE.CapsuleGeometry(0.06, 0.16, 6, 16), gold);
+      cheek.scale.set(1, 1, 0.7);
+      cheek.position.set(s * 0.29, 0.13, 0.12);
+      cheek.rotation.z = -s * 0.18;
+      head.add(cheek);
+    }
+    const chinGuard = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.05, 0.06), gold);
+    chinGuard.position.set(0, -0.03, 0.3);
+    head.add(chinGuard);
+
+    // Flowing Royal Blue Cape: curved cloth shell with a gold hem
+    const capeGroup = new THREE.Group();
+    capeGroup.position.set(0, -0.05, 0);
+    const capeMat = new THREE.MeshStandardMaterial({
+      color: 0x1d4ed8,
+      roughness: 0.7,
+      metalness: 0.06,
+      side: THREE.DoubleSide,
+    });
+    const cape = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.52, 0.86, 1.5, 28, 4, true, Math.PI * 0.6, Math.PI * 0.8),
+      capeMat
+    );
+    capeGroup.add(cape);
+    const capeTrim = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.86, 0.89, 0.09, 28, 1, true, Math.PI * 0.6, Math.PI * 0.8),
+      new THREE.MeshStandardMaterial({ color: 0xeab308, roughness: 0.26, metalness: 0.82, side: THREE.DoubleSide })
+    );
+    capeTrim.position.y = -0.71;
+    capeGroup.add(capeTrim);
+    torso.add(capeGroup);
+    capeOrTails = capeGroup;
 
     // Ornate Holy Shield on Left Arm
     const shield = new THREE.Group();
@@ -212,13 +384,24 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
     const jadeGlow = matGlow(0x38bdf8, 2.0);
 
     // Martial Tunic & Sash
-    const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.44, 0.36, 1.0, 8), whiteRobe);
+    const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.43, 0.35, 1.0, 20), whiteRobe);
     chest.position.y = 0.4;
+    chest.scale.z = 0.85;
     torso.add(chest);
-    const lapel = new THREE.Mesh(new THREE.BoxGeometry(0.52, 0.72, 0.44), azureSilk);
-    lapel.position.set(0, 0.38, 0.06);
-    lapel.rotation.z = 0.14;
+    const lapel = new THREE.Mesh(new THREE.BoxGeometry(0.44, 0.62, 0.14), azureSilk);
+    lapel.position.set(0.04, 0.46, 0.3);
+    lapel.rotation.z = 0.26;
     torso.add(lapel);
+    const lapel2 = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.56, 0.12), whiteRobe);
+    lapel2.position.set(-0.06, 0.44, 0.34);
+    lapel2.rotation.z = -0.2;
+    torso.add(lapel2);
+    const waistSash = new THREE.Mesh(new THREE.CylinderGeometry(0.37, 0.37, 0.16, 20), azureSilk);
+    waistSash.position.y = 0.02;
+    torso.add(waistSash);
+    const sashKnot = new THREE.Mesh(new THREE.SphereGeometry(0.1, 14, 10), azureSilk);
+    sashKnot.position.set(0.3, 0.02, 0.28);
+    torso.add(sashKnot);
 
     // Flowing Long Coat Tails
     const coat = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.68, 1.05, 8, 1, true), whiteRobe);
@@ -239,9 +422,12 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
       const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.25, 0.82, 8), whiteRobe);
       sleeve.position.y = -0.38;
       arm.add(sleeve);
-      const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.26, 0.16, 8), azureSilk);
+      const cuff = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.26, 0.16, 20), azureSilk);
       cuff.position.y = -0.76;
       arm.add(cuff);
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.085, 14, 10), matSkin());
+      hand.position.y = -0.87;
+      arm.add(hand);
     }
 
     for (const leg of [leftLeg, rightLeg]) {
@@ -302,25 +488,39 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
     });
 
     // Slender Ornate Mage Dress
-    const bodice = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.28, 0.85, 10), crimson);
+    const bodice = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.28, 0.85, 20), crimson);
     bodice.position.y = 0.36;
     torso.add(bodice);
-    const goldTrim = new THREE.Mesh(new THREE.TorusGeometry(0.31, 0.05, 8, 16), gold);
+    const goldTrim = new THREE.Mesh(new THREE.TorusGeometry(0.31, 0.05, 12, 28), gold);
     goldTrim.rotation.x = Math.PI / 2;
     goldTrim.position.y = -0.02;
     torso.add(goldTrim);
-    const skirt = new THREE.Mesh(new THREE.ConeGeometry(0.68, 0.85, 10), crimson);
+    const skirt = new THREE.Mesh(new THREE.ConeGeometry(0.68, 0.85, 24), crimson);
     skirt.position.y = -0.4;
     torso.add(skirt);
+    const hemTrim = new THREE.Mesh(new THREE.TorusGeometry(0.6, 0.045, 12, 32), gold);
+    hemTrim.rotation.x = Math.PI / 2;
+    hemTrim.position.y = -0.79;
+    torso.add(hemTrim);
+    const collar = new THREE.Mesh(new THREE.TorusGeometry(0.2, 0.045, 12, 24), gold);
+    collar.rotation.x = Math.PI / 2;
+    collar.position.y = 0.78;
+    torso.add(collar);
+    const chestJewel = new THREE.Mesh(new THREE.OctahedronGeometry(0.1, 0), pinkGlow);
+    chestJewel.position.set(0, 0.56, 0.3);
+    torso.add(chestJewel);
 
     for (const arm of [leftArm, rightArm]) {
       const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.14, 0.75, 8), matSkin());
       sleeve.position.y = -0.35;
       arm.add(sleeve);
-      const bangle = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.03, 6, 12), gold);
+      const bangle = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.03, 12, 24), gold);
       bangle.rotation.x = Math.PI / 2;
       bangle.position.y = -0.62;
       arm.add(bangle);
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.09, 14, 10), matSkin());
+      hand.position.y = -0.76;
+      arm.add(hand);
     }
 
     for (const leg of [leftLeg, rightLeg]) {
@@ -353,18 +553,18 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
 
     // 5 Lush Fanning Spirit Fox Tails!
     const tailGroup = new THREE.Group();
-    tailGroup.position.set(0, -0.1, -0.35);
+    tailGroup.position.set(0, 0.1, -0.18);
     for (let t = -2; t <= 2; t++) {
-      const a = t * 0.36;
+      const a = t * 0.46;
       const tail = new THREE.Group();
       tail.rotation.y = a;
-      tail.rotation.x = -0.55 - Math.abs(t) * 0.1;
-      const seg1 = new THREE.Mesh(new THREE.SphereGeometry(0.24, 8, 8), tailFur);
-      seg1.scale.set(0.85, 1.9, 0.85);
-      seg1.position.set(0, 0.45, -0.35);
-      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.2, 0.55, 7), pinkGlow);
-      tip.position.set(0, 1.05, -0.5);
-      tip.rotation.x = -0.2;
+      tail.rotation.x = -0.32 - Math.abs(t) * 0.08;
+      const seg1 = new THREE.Mesh(new THREE.SphereGeometry(0.26, 20, 14), tailFur);
+      seg1.scale.set(0.95, 2.1, 0.95);
+      seg1.position.set(0, 0.58, -0.42);
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.62, 20), pinkGlow);
+      tip.position.set(0, 1.32, -0.56);
+      tip.rotation.x = -0.18;
       tail.add(seg1, tip);
       tailGroup.add(tail);
     }
@@ -383,15 +583,24 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
     const darkArmor = matMetal(0x334155, 0.42, 0.65);
     const solarGlow = matGlow(0xfde047, 2.0);
 
-    const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.47, 0.37, 0.98, 8), sunGold);
+    const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.36, 0.98, 20), sunGold);
     chest.position.y = 0.4;
+    chest.scale.z = 0.82;
     torso.add(chest);
-    const sash = new THREE.Mesh(new THREE.BoxGeometry(0.54, 0.8, 0.46), scarlet);
-    sash.position.set(0, 0.36, 0.04);
+    const sash = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.66, 0.18), scarlet);
+    sash.position.set(0, 0.42, 0.31);
+    sash.rotation.z = 0.12;
     torso.add(sash);
-    const tasset = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.55, 0.6, 8), scarlet);
+    const sashTrim = new THREE.Mesh(new THREE.BoxGeometry(0.56, 0.07, 0.22), sunGold);
+    sashTrim.position.set(0, 0.74, 0.31);
+    torso.add(sashTrim);
+    const tasset = new THREE.Mesh(new THREE.CylinderGeometry(0.4, 0.55, 0.6, 20), scarlet);
     tasset.position.y = -0.2;
     torso.add(tasset);
+    const archerBelt = new THREE.Mesh(new THREE.TorusGeometry(0.38, 0.06, 12, 28), sunGold);
+    archerBelt.rotation.x = Math.PI / 2;
+    archerBelt.position.y = 0.02;
+    torso.add(archerBelt);
 
     // Sun Quiver + Golden Halo on Back
     const halo = new THREE.Mesh(new THREE.TorusGeometry(0.68, 0.06, 8, 24), solarGlow);
@@ -404,9 +613,16 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
       sh.position.set(sign * 0.1, 0.12, 0);
       sh.rotation.z = -sign * 0.8;
       arm.add(sh);
-      const a = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.12, 0.78, 8), darkArmor);
+      const a = new THREE.Mesh(new THREE.CylinderGeometry(0.13, 0.12, 0.78, 20), darkArmor);
       a.position.y = -0.38;
       arm.add(a);
+      const bracer = new THREE.Mesh(new THREE.TorusGeometry(0.13, 0.035, 10, 22), sunGold);
+      bracer.rotation.x = Math.PI / 2;
+      bracer.position.y = -0.7;
+      arm.add(bracer);
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.1, 14, 10), matSkin());
+      hand.position.y = -0.82;
+      arm.add(hand);
     }
 
     for (const leg of [leftLeg, rightLeg]) {
@@ -454,27 +670,50 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
 
     root.scale.setScalar(1.12); // Towering warlord stature!
 
-    const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 0.46, 1.12, 8), obsidian);
+    const chest = new THREE.Mesh(new THREE.CylinderGeometry(0.56, 0.44, 1.1, 24), obsidian);
     chest.position.y = 0.44;
+    chest.scale.z = 0.82;
     torso.add(chest);
-    const plate = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.68, 0.6), crimsonArmor);
-    plate.position.set(0, 0.5, 0.06);
+    const plate = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.62, 0.2), crimsonArmor);
+    plate.position.set(0, 0.52, 0.4);
     torso.add(plate);
-    const skirt = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.68, 0.68, 8), crimsonArmor);
+    const plateTrim = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.07, 0.24), gold);
+    plateTrim.position.set(0, 0.87, 0.4);
+    torso.add(plateTrim);
+    const demonGem = new THREE.Mesh(new THREE.OctahedronGeometry(0.14, 0), demonGlow);
+    demonGem.position.set(0, 0.6, 0.52);
+    torso.add(demonGem);
+    const skirt = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.68, 0.68, 24), crimsonArmor);
     skirt.position.y = -0.22;
     torso.add(skirt);
+    const warbelt = new THREE.Mesh(new THREE.TorusGeometry(0.48, 0.07, 12, 28), gold);
+    warbelt.rotation.x = Math.PI / 2;
+    warbelt.position.y = 0.04;
+    torso.add(warbelt);
 
     for (const [arm, sign] of [[leftArm, -1], [rightArm, 1]] as const) {
-      const pauldron = new THREE.Mesh(new THREE.DodecahedronGeometry(0.38, 0), obsidian);
-      pauldron.position.set(sign * 0.12, 0.16, 0);
+      const pauldron = new THREE.Mesh(new THREE.SphereGeometry(0.4, 20, 14, 0, Math.PI * 2, 0, Math.PI * 0.6), obsidian);
+      pauldron.scale.set(1.15, 1, 1.15);
+      pauldron.position.set(sign * 0.1, 0.18, 0);
+      pauldron.rotation.z = -sign * 0.24;
       arm.add(pauldron);
-      const spike = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.52, 5), crimsonArmor);
-      spike.position.set(sign * 0.36, 0.34, 0);
+      const rim = new THREE.Mesh(new THREE.TorusGeometry(0.36, 0.055, 12, 28), gold);
+      rim.rotation.x = Math.PI / 2;
+      rim.position.set(sign * 0.12, 0.03, 0);
+      arm.add(rim);
+      const spike = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.56, 16), crimsonArmor);
+      spike.position.set(sign * 0.36, 0.38, 0);
       spike.rotation.z = -sign * 0.65;
       arm.add(spike);
-      const a = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.16, 0.85, 8), obsidian);
-      a.position.y = -0.4;
+      const a = new THREE.Mesh(new THREE.CylinderGeometry(0.17, 0.15, 0.62, 20), obsidian);
+      a.position.y = -0.36;
       arm.add(a);
+      const bracer = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.17, 0.34, 20), crimsonArmor);
+      bracer.position.y = -0.75;
+      arm.add(bracer);
+      const fist = new THREE.Mesh(new THREE.SphereGeometry(0.15, 16, 12), gold);
+      fist.position.y = -0.95;
+      arm.add(fist);
     }
 
     for (const leg of [leftLeg, rightLeg]) {
@@ -572,9 +811,16 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
     capeOrTails = ribbon;
 
     for (const arm of [leftArm, rightArm]) {
-      const a = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.14, 0.68, 8), jade);
+      const a = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.14, 0.68, 20), jade);
       a.position.y = -0.32;
       arm.add(a);
+      const bracelet = new THREE.Mesh(new THREE.TorusGeometry(0.11, 0.03, 10, 22), gold);
+      bracelet.rotation.x = Math.PI / 2;
+      bracelet.position.y = -0.58;
+      arm.add(bracelet);
+      const hand = new THREE.Mesh(new THREE.SphereGeometry(0.085, 14, 10), matSkin());
+      hand.position.y = -0.7;
+      arm.add(hand);
     }
 
     const face = new THREE.Mesh(new THREE.SphereGeometry(0.32, 12, 10), matSkin());
@@ -600,6 +846,8 @@ export function buildHeroModel(heroId: HeroId): ArticulatedModel {
     weapon = harp;
   }
 
+  addFacialFeatures(head);
+  polishModel(root);
   enableShadows(root);
   return {
     root,
@@ -754,6 +1002,7 @@ export function buildMinionModel(team: Team, type: MinionType): THREE.Group {
     g.scale.setScalar(scale);
   }
 
+  polishModel(g);
   enableShadows(g);
   return g;
 }
@@ -852,6 +1101,7 @@ export function buildMonsterModel(type: MonsterType): THREE.Group {
     g.add(body, head, crest);
   }
 
+  polishModel(g);
   enableShadows(g);
   return g;
 }

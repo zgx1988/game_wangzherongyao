@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { HEROES } from '../sim/heroes';
 import { HeroId } from '../sim/types';
 import { ArticulatedModel, animateHeroModel, buildHeroModel } from './HeroModelBuilder';
@@ -39,6 +40,11 @@ export class HeroPreview3D {
     this.renderer.shadowMap.enabled = true;
     container.innerHTML = '';
     container.appendChild(this.renderer.domElement);
+
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.8;
+    pmrem.dispose();
 
     // Dramatic studio three-point lighting
     const hemi = new THREE.HemisphereLight(0xdbeafe, 0x1e293b, 1.0);

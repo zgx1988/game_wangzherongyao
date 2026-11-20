@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { HERO_VISION_RANGE, MINION_VISION_RANGE, TURRET_VISION_RANGE } from '../sim/constants';
 import { GameEvent, Team, WorldSnapshot } from '../sim/types';
 import {
@@ -32,6 +33,7 @@ export class GameRenderer {
   private overlayCtx: CanvasRenderingContext2D;
 
   private sunLight: THREE.DirectionalLight;
+  private fillLight: THREE.DirectionalLight;
   public mapBuilder: MapBuilder;
   public vfx: VfxSystem;
 
@@ -51,6 +53,9 @@ export class GameRenderer {
   private shakeAmp = 0;
   public flipForRed = false;
   public highQuality = true;
+  private cameraZoom = 1;
+  private cameraYaw = 0;
+  public lockedTargetId: string | null = null;
 
   private raycaster = new THREE.Raycaster();
   private groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
@@ -75,6 +80,12 @@ export class GameRenderer {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.18;
+
+    // Image-based lighting: without it metalness armour renders as flat plastic
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.45;
+    pmrem.dispose();
 
     container.innerHTML = '';
     this.renderer.domElement.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;display:block;';
@@ -105,6 +116,12 @@ export class GameRenderer {
     this.sunLight.shadow.bias = -0.0005;
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
+
+    // Camera-side fill light keeps hero faces and armor readable (no shadows)
+    this.fillLight = new THREE.DirectionalLight(0xc7e6ff, 0.62);
+    this.fillLight.castShadow = false;
+    this.scene.add(this.fillLight);
+    this.scene.add(this.fillLight.target);
 
     // Canyon Map & VFX
     this.mapBuilder = new MapBuilder();
@@ -204,6 +221,67 @@ export class GameRenderer {
 
   public clearManualCameraPan(): void {
     this.manualPanOffset.set(0, 0);
+  }
+
+  public getZoom(): number {
+    return this.cameraZoom;
+  }
+
+  public setZoom(value: number): void {
+    this.cameraZoom = Math.max(0.55, Math.min(1.8, value));
+  }
+
+  public zoomBy(factor: number): void {
+    this.setZoom(this.cameraZoom * factor);
+  }
+
+  public rotateCamera(delta: number): void {
+    this.cameraYaw += delta;
+  }
+
+  public resetCameraView(): void {
+    this.cameraZoom = 1;
+    this.cameraYaw = 0;
+  }
+
+  public setLockedTarget(id: string | null): void {
+    this.lockedTargetId = id;
+  }
+
+  public pickEnemyUnit(
+    clientX: number,
+    clientY: number,
+    snap: WorldSnapshot,
+    localTeam: Team
+  ): string | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const candidates: { id: string; d: number }[] = [];
+    const consider = (id: string, x: number, y: number, z: number, bias: number) => {
+      const p = this.project(x, y, z);
+      if (!p.visible) return;
+      candidates.push({ id, d: Math.hypot(p.sx - px, p.sy - py) - bias });
+    };
+    for (const h of snap.heroes) {
+      if (!h.alive || h.team === localTeam) continue;
+      const lp = this.heroPosLerp.get(h.id) || h;
+      consider(h.id, lp.x, 2.2, lp.z, 14);
+    }
+    for (const m of snap.minions) {
+      if (m.team === localTeam) continue;
+      consider(m.id, m.x, 1.4, m.z, 0);
+    }
+    for (const mon of snap.monsters) {
+      if (!mon.alive) continue;
+      consider(mon.id, mon.x, 2.0, mon.z, 4);
+    }
+    for (const t of snap.turrets) {
+      if (!t.alive || t.team === localTeam) continue;
+      consider(t.id, t.x, t.tier === 'crystal' ? 5.5 : 4.2, t.z, 6);
+    }
+    const best = candidates.sort((a, b) => a.d - b.d)[0];
+    return best && best.d < 48 ? best.id : null;
   }
 
   public triggerShake(amp: number, dur: number): void {
@@ -443,11 +521,13 @@ export class GameRenderer {
       shakeZ = (Math.random() - 0.5) * this.shakeAmp;
     }
 
-    const dirSign = this.flipForRed ? -1 : 1;
+    const baseAngle = this.flipForRed ? Math.PI : 0;
+    const angle = baseAngle + this.cameraYaw;
+    const backDist = 22.5 * this.cameraZoom;
     this.camera.position.set(
-      this.cameraTarget.x + shakeX,
-      27.5,
-      this.cameraTarget.z + 22.5 * dirSign + shakeZ
+      this.cameraTarget.x + Math.sin(angle) * backDist + shakeX,
+      27.5 * this.cameraZoom,
+      this.cameraTarget.z + Math.cos(angle) * backDist + shakeZ
     );
     this.camera.lookAt(this.cameraTarget.x, 0.5, this.cameraTarget.z);
 
@@ -455,6 +535,10 @@ export class GameRenderer {
     this.sunLight.position.set(this.cameraTarget.x + 28, 48, this.cameraTarget.z + 22);
     this.sunLight.target.position.set(this.cameraTarget.x, 0, this.cameraTarget.z);
     this.sunLight.target.updateMatrixWorld();
+
+    this.fillLight.position.set(this.camera.position.x, this.camera.position.y + 8, this.camera.position.z);
+    this.fillLight.target.position.set(this.cameraTarget.x, 1.6, this.cameraTarget.z);
+    this.fillLight.target.updateMatrixWorld();
 
     // 6. Render 3D Scene
     this.renderer.render(this.scene, this.camera);
@@ -607,6 +691,71 @@ export class GameRenderer {
         ctx.font = 'bold 11px system-ui, sans-serif';
         ctx.fillStyle = statusColor;
         ctx.fillText(statusLabel, p.sx, by - 19);
+      }
+    }
+
+    // Target reticles: turret aggro and player lock-on
+    const nowSec = performance.now() / 1000;
+    const unitAnchor = (id: string): { x: number; z: number; y: number; r: number } | null => {
+      const h = snap.heroes.find((u) => u.id === id && u.alive);
+      if (h) {
+        const lp = this.heroPosLerp.get(h.id) || h;
+        return { x: lp.x, z: lp.z, y: 0.25, r: 1.9 };
+      }
+      const m = snap.minions.find((u) => u.id === id);
+      if (m) return { x: m.x, z: m.z, y: 0.2, r: 1.35 };
+      const mon = snap.monsters.find((u) => u.id === id && u.alive);
+      if (mon) return { x: mon.x, z: mon.z, y: 0.2, r: mon.radius + 0.5 };
+      const t = snap.turrets.find((u) => u.id === id && u.alive);
+      if (t) return { x: t.x, z: t.z, y: 0.2, r: 3.4 };
+      return null;
+    };
+    const drawReticle = (sx: number, sy: number, color: string, size: number, spin: number) => {
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.translate(sx, sy);
+      ctx.rotate(spin);
+      for (let i = 0; i < 4; i++) {
+        ctx.rotate(Math.PI / 2);
+        ctx.beginPath();
+        ctx.moveTo(size, 0);
+        ctx.lineTo(size, -size * 0.5);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(size, 0);
+        ctx.lineTo(size + size * 0.35, size * 0.35);
+        ctx.stroke();
+      }
+      ctx.restore();
+    };
+
+    for (const t of snap.turrets) {
+      if (!t.alive || !t.targetId) continue;
+      const anchor = unitAnchor(t.targetId);
+      if (!anchor) continue;
+      const p = this.project(anchor.x, anchor.y, anchor.z);
+      if (!p.visible) continue;
+      const onPlayer = t.targetId === localHeroId;
+      const color = onPlayer ? `rgba(255,60,60,${0.55 + Math.sin(nowSec * 12) * 0.35})` : 'rgba(251,146,60,0.7)';
+      drawReticle(p.sx, p.sy, color, 16, nowSec * 1.6);
+    }
+
+    if (this.lockedTargetId) {
+      const anchor = unitAnchor(this.lockedTargetId);
+      if (anchor) {
+        const p = this.project(anchor.x, anchor.y, anchor.z);
+        if (p.visible) {
+          drawReticle(p.sx, p.sy, '#facc15', 22, -nowSec * 1.2);
+          const size = 30 * anchor.r;
+          ctx.save();
+          ctx.strokeStyle = `rgba(250,204,21,${0.45 + Math.sin(nowSec * 6) * 0.2})`;
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.ellipse(p.sx, p.sy, size * 0.42, size * 0.2, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.restore();
+        }
       }
     }
 

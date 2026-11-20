@@ -858,6 +858,37 @@ export class GameSimulation {
       }
     }
 
+    // Locked / auto basic attack: chase the target until it is in reach.
+    let attackTarget: { kind: 'hero' | 'minion' | 'turret' | 'monster'; unit: any } | null = null;
+    const hasManualMove = moveMag > 0.05;
+    if (input.basicAttack) {
+      attackTarget = input.attackTargetId
+        ? this.findEnemyUnitById(input.attackTargetId, hero.team)
+        : null;
+      if (!attackTarget) {
+        const chaseRange = hero.attackRange + (hero.arthurS1Empowered > 0 ? 3.5 : 0.8) + 7;
+        attackTarget = this.findBasicAttackTarget(hero, input.targetPriority, chaseRange);
+      }
+      if (attackTarget && !hasManualMove) {
+        const dxT = attackTarget.unit.x - hero.x;
+        const dzT = attackTarget.unit.z - hero.z;
+        const dT = Math.hypot(dxT, dzT);
+        const reach = this.basicAttackReach(hero, attackTarget);
+        if (dT > reach) {
+          hero.recallTimer = 0;
+          let spd = hero.moveSpeed;
+          if (hero.speedBoostTimer > 0) spd *= 1 + hero.speedBoostFactor;
+          if (hero.slowTimer > 0) spd *= Math.max(0.35, 1 - hero.slowFactor);
+          const step = Math.min(spd * dt, Math.max(0, dT - reach + 0.05));
+          hero.x += (dxT / dT) * step;
+          hero.z += (dzT / dT) * step;
+          hero.facing = Math.atan2(dxT, dzT);
+          this.resolveHeroCollisions(hero);
+          if (hero.animTimer <= 0) hero.animState = 'run';
+        }
+      }
+    }
+
     // Cast Active Skill
     if (input.castSkill && hero.silenceTimer <= 0) {
       this.tryCastSkill(hero, input.castSkill);
@@ -865,7 +896,13 @@ export class GameSimulation {
 
     // Basic Attack
     if (input.basicAttack && hero.attackCooldown <= 0) {
-      this.tryBasicAttack(hero, input.targetPriority);
+      if (input.attackTargetId) {
+        if (attackTarget && Math.hypot(attackTarget.unit.x - hero.x, attackTarget.unit.z - hero.z) <= this.basicAttackReach(hero, attackTarget)) {
+          this.tryBasicAttack(hero, input.targetPriority, attackTarget);
+        }
+      } else {
+        this.tryBasicAttack(hero, input.targetPriority);
+      }
     }
 
     this.syncHeroBuffs(hero);
@@ -1021,9 +1058,10 @@ export class GameSimulation {
 
   private findBasicAttackTarget(
     hero: HeroState,
-    priority: 'auto' | 'minion' | 'tower'
+    priority: 'auto' | 'minion' | 'tower',
+    searchRange?: number
   ): { kind: 'hero' | 'minion' | 'turret' | 'monster'; unit: any } | null {
-    const range = hero.attackRange + (hero.arthurS1Empowered > 0 ? 3.5 : 0.8);
+    const range = searchRange ?? hero.attackRange + (hero.arthurS1Empowered > 0 ? 3.5 : 0.8);
 
     const visibleEnemyHero = () =>
       this.heroes
@@ -1074,8 +1112,37 @@ export class GameSimulation {
     return null;
   }
 
-  private tryBasicAttack(hero: HeroState, priority: 'auto' | 'minion' | 'tower'): void {
-    const target = this.findBasicAttackTarget(hero, priority);
+  private findEnemyUnitById(
+    id: string,
+    team: Team
+  ): { kind: 'hero' | 'minion' | 'turret' | 'monster'; unit: any } | null {
+    const h = this.heroes.find(
+      (x) => x.id === id && x.alive && x.team !== team && x.untargetableTimer <= 0
+    );
+    if (h) return { kind: 'hero', unit: h };
+    const m = this.minions.find((x) => x.id === id && x.team !== team && x.hp > 0);
+    if (m) return { kind: 'minion', unit: m };
+    const mon = this.monsters.find((x) => x.id === id && x.alive);
+    if (mon) return { kind: 'monster', unit: mon };
+    const t = this.turrets.find((x) => x.id === id && x.alive && x.team !== team);
+    if (t) return { kind: 'turret', unit: t };
+    return null;
+  }
+
+  private basicAttackReach(
+    hero: HeroState,
+    target: { kind: 'hero' | 'minion' | 'turret' | 'monster'; unit: any }
+  ): number {
+    const base = hero.attackRange + (hero.arthurS1Empowered > 0 ? 3.5 : 0.8);
+    return base + (target.kind === 'turret' ? 3.2 : target.unit.radius || 1.2);
+  }
+
+  private tryBasicAttack(
+    hero: HeroState,
+    priority: 'auto' | 'minion' | 'tower',
+    forced?: { kind: 'hero' | 'minion' | 'turret' | 'monster'; unit: any } | null
+  ): void {
+    const target = forced ?? this.findBasicAttackTarget(hero, priority);
     if (!target) return;
 
     const def = HEROES[hero.heroId];
@@ -2350,7 +2417,9 @@ export class GameSimulation {
         if (h && dist(t.x, t.z, h.x, h.z) <= t.range) {
           target = { kind: 'hero', unit: h };
         } else {
-          const m = this.minions.find((x) => x.id === t.targetId);
+          const m = this.minions.find(
+            (x) => x.id === t.targetId && x.hp > 0 && x.team !== t.team
+          );
           if (m && dist(t.x, t.z, m.x, m.z) <= t.range) {
             target = { kind: 'minion', unit: m };
           }
@@ -2409,7 +2478,16 @@ export class GameSimulation {
           color: t.team === 'blue' ? '#38bdf8' : '#f43f5e',
           hitIds: [],
         });
-        this.emit({ type: 'sfx', sfxKind: 'turret_fire', x: t.x, z: t.z });
+        this.emit({
+          type: 'vfx',
+          vfxKind: 'turret_shot',
+          x: t.x,
+          z: t.z,
+          targetX: target.unit.x,
+          targetZ: target.unit.z,
+          color: t.team === 'blue' ? '#38bdf8' : '#f43f5e',
+          sfxKind: 'turret_fire',
+        });
       }
     }
   }

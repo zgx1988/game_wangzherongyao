@@ -30,6 +30,13 @@ export class HudController {
   private joyCenter = { x: 0, y: 0 };
   private rightClickTarget: { x: number; z: number } | null = null;
   private attackHeld = false;
+  private autoAttack = false;
+  private attackTargetId: string | null = null;
+  private rotatingCamera = false;
+  private lastRotateX = 0;
+  private touchPoints = new Map<number, { x: number; y: number }>();
+  private pinchStartDist = 0;
+  private pinchStartZoom = 1;
   private targetPriority: TargetPriority = 'auto';
   private mouseWorld: { x: number; z: number } = { x: 80, z: 80 };
 
@@ -258,7 +265,7 @@ export class HudController {
       </div>
 
       <!-- PC Controls Hint -->
-      <div class="hud-pc-hint">WASD/右键移动 · Space/J普攻 · Q/E/R(或1/2/3)技能 · F召唤师 · B回城 · P商店 · Tab战绩</div>
+      <div class="hud-pc-hint">WASD/右键移动 · 左键点敌锁定普攻 · Space/J普攻 · Q/E/R技能 · 滚轮缩放 · 中键/Z/C旋转 · V重置视角 · P商店 · Tab战绩</div>
 
       <!-- EQUIPMENT SHOP MODAL -->
       <div id="hudShopModal" class="modal-backdrop hidden">
@@ -323,6 +330,12 @@ export class HudController {
               <span>红方镜像翻转视角</span>
               <input id="setFlipCam" type="checkbox" ${this.renderer.flipForRed ? 'checked' : ''} />
             </label>
+            <div class="setting-row">
+              <span>视角操作：滚轮缩放 · 按住中键拖动或 Z/C 旋转 · V 重置</span>
+            </div>
+            <div class="setting-row">
+              <span>战斗操作：左键点击敌人锁定并自动追击 · 右键移动 · SPACE 普攻</span>
+            </div>
           </div>
           <div class="settings-actions">
             <button id="exitMatchBtn" class="btn-danger">退出本局并返回大厅</button>
@@ -381,19 +394,76 @@ export class HudController {
     window.addEventListener('pointerup', this.onGlobalPointerUp);
     window.addEventListener('pointercancel', this.onGlobalPointerUp);
 
-    // Canvas Right-Click move & mouse tracking on PC
+    // Canvas: left-click select/attack, right-click move, wheel zoom, middle-drag rotate
     const canvas = this.renderer.renderer.domElement;
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        this.renderer.zoomBy(e.deltaY > 0 ? 1.1 : 0.9);
+      },
+      { passive: false }
+    );
     canvas.addEventListener('pointerdown', (e) => {
       soundEngine.unlock();
+      if (e.pointerType === 'touch') {
+        this.touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (this.touchPoints.size === 2) {
+          const pts = [...this.touchPoints.values()];
+          this.pinchStartDist = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y) || 1;
+          this.pinchStartZoom = this.renderer.getZoom();
+        }
+      }
+      if (e.button === 1) {
+        e.preventDefault();
+        this.rotatingCamera = true;
+        this.lastRotateX = e.clientX;
+        return;
+      }
       if (e.button === 2) {
         const w = this.renderer.screenToWorld(e.clientX, e.clientY);
         if (w) {
           this.rightClickTarget = w;
           this.renderer.showMoveMarker(w.x, w.z);
         }
+        this.clearAttackLock();
+        return;
+      }
+      if (e.button === 0 && this.touchPoints.size < 2) {
+        const hero = this.getLocalHero();
+        const id = hero && this.latestSnap
+          ? this.renderer.pickEnemyUnit(e.clientX, e.clientY, this.latestSnap, hero.team)
+          : null;
+        if (id) {
+          this.lockAttackTarget(id);
+        } else {
+          this.clearAttackLock();
+          const w = this.renderer.screenToWorld(e.clientX, e.clientY);
+          if (w) {
+            this.rightClickTarget = w;
+            this.renderer.showMoveMarker(w.x, w.z);
+          }
+        }
       }
     });
+    canvas.addEventListener('pointermove', (e) => {
+      if (e.pointerType === 'touch' && this.touchPoints.has(e.pointerId)) {
+        this.touchPoints.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (this.touchPoints.size === 2 && this.pinchStartDist > 0) {
+          const pts = [...this.touchPoints.values()];
+          const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+          this.renderer.setZoom(this.pinchStartZoom * (d / this.pinchStartDist));
+        }
+      }
+    });
+    const endCanvasPointer = (e: PointerEvent) => {
+      this.touchPoints.delete(e.pointerId);
+      if (this.touchPoints.size < 2) this.pinchStartDist = 0;
+      if (e.button === 1) this.rotatingCamera = false;
+    };
+    canvas.addEventListener('pointerup', endCanvasPointer);
+    canvas.addEventListener('pointercancel', endCanvasPointer);
 
     // Virtual Joystick touch/mouse
     const joyZone = this.root.querySelector('#hudJoyZone') as HTMLElement;
@@ -567,6 +637,12 @@ export class HudController {
     } else if (k === ' ' || k === 'j') {
       e.preventDefault();
       this.attackHeld = true;
+    } else if (k === 'z') {
+      this.renderer.rotateCamera(-0.16);
+    } else if (k === 'c') {
+      this.renderer.rotateCamera(0.16);
+    } else if (k === 'v') {
+      this.renderer.resetCameraView();
     }
   };
 
@@ -581,6 +657,12 @@ export class HudController {
     // Track world cursor for PC aiming
     const w = this.renderer.screenToWorld(e.clientX, e.clientY);
     if (w) this.mouseWorld = w;
+
+    if (this.rotatingCamera) {
+      const dx = e.clientX - this.lastRotateX;
+      this.lastRotateX = e.clientX;
+      this.renderer.rotateCamera(-dx * 0.006);
+    }
 
     if (this.joyActive && e.pointerId === this.joyPointerId) {
       this.updateJoystick(e.clientX, e.clientY);
@@ -604,6 +686,7 @@ export class HudController {
   };
 
   private onGlobalPointerUp = (e: PointerEvent) => {
+    if (e.button === 1) this.rotatingCamera = false;
     if (this.joyActive && e.pointerId === this.joyPointerId) {
       this.joyActive = false;
       this.joyPointerId = null;
@@ -651,7 +734,10 @@ export class HudController {
     const mag = clamped / maxR;
     this.joyX = nx * mag * flip;
     this.joyZ = ny * mag * flip;
-    if (mag > 0.1) this.rightClickTarget = null;
+    if (mag > 0.1) {
+      this.rightClickTarget = null;
+      this.clearAttackLock();
+    }
   }
 
   private updateSkillAimVisual(): void {
@@ -718,6 +804,21 @@ export class HudController {
     return this.latestSnap?.heroes.find((h) => h.id === this.localHeroId);
   }
 
+  private lockAttackTarget(id: string): void {
+    this.attackTargetId = id;
+    this.autoAttack = true;
+    this.rightClickTarget = null;
+    this.renderer.setLockedTarget(id);
+  }
+
+  private clearAttackLock(): void {
+    this.autoAttack = false;
+    if (this.attackTargetId) {
+      this.attackTargetId = null;
+      this.renderer.setLockedTarget(null);
+    }
+  }
+
   public sampleInput(): PlayerInput {
     // Combine WASD + Arrow keys + Virtual Joystick
     let kx = 0;
@@ -735,6 +836,7 @@ export class HudController {
     let moveZ = this.joyActive ? this.joyZ : kz;
     if (Math.hypot(moveX, moveZ) > 0.1) {
       this.rightClickTarget = null;
+      this.clearAttackLock();
     }
 
     // Clear right-click target when reached
@@ -749,8 +851,9 @@ export class HudController {
       moveX,
       moveZ,
       moveTarget: this.rightClickTarget,
-      basicAttack: this.attackHeld,
+      basicAttack: this.attackHeld || this.autoAttack,
       targetPriority: this.targetPriority,
+      attackTargetId: this.attackTargetId,
       castSkill: this.pendingSkill,
       castSummoner: this.pendingSummoner,
       castHeal: this.pendingHeal,
@@ -850,6 +953,17 @@ export class HudController {
     this.localHeroId = localHeroId;
     const hero = snap.heroes.find((h) => h.id === localHeroId) || snap.heroes[0];
     if (!hero) return;
+
+    // Drop a lock-on target as soon as it dies or disappears
+    if (this.attackTargetId) {
+      const stillThere =
+        snap.heroes.some((h) => h.id === this.attackTargetId && h.alive) ||
+        snap.minions.some((m) => m.id === this.attackTargetId && m.hp > 0) ||
+        snap.monsters.some((m) => m.id === this.attackTargetId && m.alive) ||
+        snap.turrets.some((t) => t.id === this.attackTargetId && t.alive);
+      if (!stillThere) this.clearAttackLock();
+    }
+    if (!hero.alive && this.autoAttack) this.clearAttackLock();
 
     // FPS counter
     this.fpsFrames++;

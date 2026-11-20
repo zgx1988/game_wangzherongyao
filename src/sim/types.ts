@@ -360,6 +360,7 @@ export interface PlayerInput {
   moveTarget?: Vec2 | null; // Optional right-click move target
   basicAttack: boolean;
   targetPriority: TargetPriority;
+  attackTargetId?: string | null;
   castSkill?: {
     slot: 0 | 1 | 2;
     dirX: number;

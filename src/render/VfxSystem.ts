@@ -233,6 +233,32 @@ export class VfxSystem {
         break;
       }
 
+      case 'turret_shot': {
+        const tx = ev.targetX ?? x;
+        const tz = ev.targetZ ?? z;
+        const beam = new THREE.Mesh(
+          new THREE.CylinderGeometry(0.09, 0.26, 1, 6),
+          new THREE.MeshBasicMaterial({
+            color,
+            transparent: true,
+            opacity: 0.9,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+          })
+        );
+        const from = new THREE.Vector3(x, 6.6, z);
+        const to = new THREE.Vector3(tx, 1.4, tz);
+        const mid = from.clone().add(to).multiplyScalar(0.5);
+        beam.position.copy(mid);
+        beam.scale.y = from.distanceTo(to);
+        beam.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), to.clone().sub(from).normalize());
+        this.addEffect(beam, 0.2, (t) => {
+          (beam.material as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.95;
+        });
+        this.spawnShockwave(tx, tz, 1.9, color.getHex(), 0.24);
+        break;
+      }
+
       case 'fountain_laser':
       case 'soul_siphon': {
         const tx = ev.targetX ?? x;
