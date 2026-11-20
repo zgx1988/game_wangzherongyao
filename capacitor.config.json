@@ -1,0 +1,13 @@
+{
+  "appId": "com.honorofglory.moba5v5",
+  "appName": "荣耀峡谷5v5",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true,
+    "backgroundColor": "#060b16"
+  }
+}
